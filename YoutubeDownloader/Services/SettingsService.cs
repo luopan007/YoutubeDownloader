@@ -1,6 +1,8 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
+using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Cogwheel;
@@ -20,6 +22,8 @@ public partial class SettingsService : SettingsBase, INotifyPropertyChanged
 
     public bool IsDarkModeEnabled { get; set; } = IsDarkModeEnabledByDefault();
 
+    public bool IsAuthPersisted { get; set; } = true;
+
     public bool ShouldInjectTags { get; set; } = true;
 
     public bool ShouldSkipExistingFiles { get; set; }
@@ -30,15 +34,28 @@ public partial class SettingsService : SettingsBase, INotifyPropertyChanged
 
     public Version? LastAppVersion { get; set; }
 
+    public IReadOnlyList<Cookie>? LastAuthCookies { get; set; }
+
     // STJ cannot properly serialize immutable structs
     [JsonConverter(typeof(ContainerJsonConverter))]
     public Container LastContainer { get; set; } = Container.Mp4;
 
-    public VideoQualityPreference LastVideoQualityPreference { get; set; } = VideoQualityPreference.Highest;
+    public VideoQualityPreference LastVideoQualityPreference { get; set; } =
+        VideoQualityPreference.Highest;
 
     public SettingsService()
-        : base(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Settings.dat"))
+        : base(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Settings.dat")) { }
+
+    public override void Save()
     {
+        // Clear the cookies if they are not supposed to be persisted
+        var lastAuthCookies = LastAuthCookies;
+        if (!IsAuthPersisted)
+            LastAuthCookies = null;
+
+        base.Save();
+
+        LastAuthCookies = lastAuthCookies;
     }
 }
 
@@ -48,10 +65,14 @@ public partial class SettingsService
     {
         try
         {
-            return Registry.CurrentUser.OpenSubKey(
-                "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                false
-            )?.GetValue("AppsUseLightTheme") is 0;
+            return Registry
+                .CurrentUser
+                .OpenSubKey(
+                    "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                    false
+                )
+                ?.GetValue("AppsUseLightTheme")
+                is 0;
         }
         catch
         {
@@ -64,7 +85,11 @@ public partial class SettingsService
 {
     private class ContainerJsonConverter : JsonConverter<Container>
     {
-        public override Container Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        public override Container Read(
+            ref Utf8JsonReader reader,
+            Type typeToConvert,
+            JsonSerializerOptions options
+        )
         {
             Container? result = null;
 
@@ -72,10 +97,12 @@ public partial class SettingsService
             {
                 while (reader.Read() && reader.TokenType != JsonTokenType.EndObject)
                 {
-                    if (reader.TokenType == JsonTokenType.PropertyName &&
-                        reader.GetString() == "Name" &&
-                        reader.Read() &&
-                        reader.TokenType == JsonTokenType.String)
+                    if (
+                        reader.TokenType == JsonTokenType.PropertyName
+                        && reader.GetString() == "Name"
+                        && reader.Read()
+                        && reader.TokenType == JsonTokenType.String
+                    )
                     {
                         var name = reader.GetString();
                         if (!string.IsNullOrWhiteSpace(name))
@@ -84,10 +111,17 @@ public partial class SettingsService
                 }
             }
 
-            return result ?? throw new InvalidOperationException($"Invalid JSON for type '{typeToConvert.FullName}'.");
+            return result
+                ?? throw new InvalidOperationException(
+                    $"Invalid JSON for type '{typeToConvert.FullName}'."
+                );
         }
 
-        public override void Write(Utf8JsonWriter writer, Container value, JsonSerializerOptions options)
+        public override void Write(
+            Utf8JsonWriter writer,
+            Container value,
+            JsonSerializerOptions options
+        )
         {
             writer.WriteStartObject();
             writer.WriteString("Name", value.Name);

@@ -25,10 +25,6 @@ public class DashboardViewModel : PropertyChangedBase, IDisposable
     private readonly AutoResetProgressMuxer _progressMuxer;
     private readonly ResizableSemaphore _downloadSemaphore = new();
 
-    private readonly QueryResolver _queryResolver = new();
-    private readonly VideoDownloader _videoDownloader = new();
-    private readonly MediaTagInjector _mediaTagInjector = new();
-
     public bool IsBusy { get; private set; }
 
     public ProgressContainer<Percentage> Progress { get; } = new();
@@ -44,7 +40,8 @@ public class DashboardViewModel : PropertyChangedBase, IDisposable
     public DashboardViewModel(
         IViewModelFactory viewModelFactory,
         DialogManager dialogManager,
-        SettingsService settingsService)
+        SettingsService settingsService
+    )
     {
         _viewModelFactory = viewModelFactory;
         _dialogManager = dialogManager;
@@ -52,16 +49,28 @@ public class DashboardViewModel : PropertyChangedBase, IDisposable
 
         _progressMuxer = Progress.CreateMuxer().WithAutoReset();
 
-        _settingsService.BindAndInvoke(o => o.ParallelLimit, (_, e) => _downloadSemaphore.MaxCount = e.NewValue);
-        Progress.Bind(o => o.Current, (_, _) => NotifyOfPropertyChange(() => IsProgressIndeterminate));
+        _settingsService.BindAndInvoke(
+            o => o.ParallelLimit,
+            (_, e) => _downloadSemaphore.MaxCount = e.NewValue
+        );
+
+        Progress.Bind(
+            o => o.Current,
+            (_, _) => NotifyOfPropertyChange(() => IsProgressIndeterminate)
+        );
+
         Downloads.Bind(o => o.Count, (_, _) => NotifyOfPropertyChange(() => IsDownloadsAvailable));
     }
 
+    public bool CanShowAuthSetup => !IsBusy;
+
+    public async void ShowAuthSetup() =>
+        await _dialogManager.ShowDialogAsync(_viewModelFactory.CreateAuthSetupViewModel());
+
     public bool CanShowSettings => !IsBusy;
 
-    public async void ShowSettings() => await _dialogManager.ShowDialogAsync(
-        _viewModelFactory.CreateSettingsViewModel()
-    );
+    public async void ShowSettings() =>
+        await _dialogManager.ShowDialogAsync(_viewModelFactory.CreateSettingsViewModel());
 
     private void EnqueueDownload(DownloadViewModel download, int position = 0)
     {
@@ -71,19 +80,24 @@ public class DashboardViewModel : PropertyChangedBase, IDisposable
         {
             try
             {
-                using var access = await _downloadSemaphore.AcquireAsync(download.CancellationToken);
+                var downloader = new VideoDownloader(_settingsService.LastAuthCookies);
+                var tagInjector = new MediaTagInjector();
+
+                using var access = await _downloadSemaphore.AcquireAsync(
+                    download.CancellationToken
+                );
 
                 download.Status = DownloadStatus.Started;
 
                 var downloadOption =
-                    download.DownloadOption ??
-                    await _videoDownloader.GetBestDownloadOptionAsync(
+                    download.DownloadOption
+                    ?? await downloader.GetBestDownloadOptionAsync(
                         download.Video!.Id,
                         download.DownloadPreference!,
                         download.CancellationToken
                     );
 
-                await _videoDownloader.DownloadVideoAsync(
+                await downloader.DownloadVideoAsync(
                     download.FilePath!,
                     download.Video!,
                     downloadOption,
@@ -95,7 +109,7 @@ public class DashboardViewModel : PropertyChangedBase, IDisposable
                 {
                     try
                     {
-                        await _mediaTagInjector.InjectTagsAsync(
+                        await tagInjector.InjectTagsAsync(
                             download.FilePath!,
                             download.Video!,
                             download.CancellationToken
@@ -113,7 +127,7 @@ public class DashboardViewModel : PropertyChangedBase, IDisposable
             {
                 try
                 {
-                    // Delete incompletely downloaded file
+                    // Delete the incompletely downloaded file
                     File.Delete(download.FilePath!);
                 }
                 catch
@@ -121,14 +135,13 @@ public class DashboardViewModel : PropertyChangedBase, IDisposable
                     // Ignore
                 }
 
-                download.Status = ex is OperationCanceledException
-                    ? DownloadStatus.Canceled
-                    : DownloadStatus.Failed;
+                download.Status =
+                    ex is OperationCanceledException
+                        ? DownloadStatus.Canceled
+                        : DownloadStatus.Failed;
 
                 // Short error message for YouTube-related errors, full for others
-                download.ErrorMessage = ex is YoutubeExplodeException
-                    ? ex.Message
-                    : ex.ToString();
+                download.ErrorMessage = ex is YoutubeExplodeException ? ex.Message : ex.ToString();
             }
             finally
             {
@@ -149,13 +162,19 @@ public class DashboardViewModel : PropertyChangedBase, IDisposable
 
         IsBusy = true;
 
-        // Small weight to not offset any existing download operations
+        // Small weight so as to not offset any existing download operations
         var progress = _progressMuxer.CreateInput(0.01);
 
         try
         {
-            var result = await _queryResolver.ResolveAsync(
-                Query.Split("\n", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+            var resolver = new QueryResolver(_settingsService.LastAuthCookies);
+            var downloader = new VideoDownloader(_settingsService.LastAuthCookies);
+
+            var result = await resolver.ResolveAsync(
+                Query.Split(
+                    "\n",
+                    StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries
+                ),
                 progress
             );
 
@@ -163,7 +182,7 @@ public class DashboardViewModel : PropertyChangedBase, IDisposable
             if (result.Videos.Count == 1)
             {
                 var video = result.Videos.Single();
-                var downloadOptions = await _videoDownloader.GetDownloadOptionsAsync(video.Id);
+                var downloadOptions = await downloader.GetDownloadOptionsAsync(video.Id);
 
                 var download = await _dialogManager.ShowDialogAsync(
                     _viewModelFactory.CreateDownloadSingleSetupViewModel(video, downloadOptions)
@@ -182,7 +201,9 @@ public class DashboardViewModel : PropertyChangedBase, IDisposable
                         result.Title,
                         result.Videos,
                         // Pre-select videos if they come from a single query and not from search
-                        result.Kind is not QueryResultKind.Search and not QueryResultKind.Aggregate
+                        result.Kind
+                            is not QueryResultKind.Search
+                                and not QueryResultKind.Aggregate
                     )
                 );
 
@@ -242,7 +263,12 @@ public class DashboardViewModel : PropertyChangedBase, IDisposable
     {
         foreach (var download in Downloads.ToArray())
         {
-            if (download.Status is DownloadStatus.Completed or DownloadStatus.Failed or DownloadStatus.Canceled)
+            if (
+                download.Status
+                is DownloadStatus.Completed
+                    or DownloadStatus.Failed
+                    or DownloadStatus.Canceled
+            )
                 RemoveDownload(download);
         }
     }

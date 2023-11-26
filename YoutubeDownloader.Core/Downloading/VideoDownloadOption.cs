@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using YoutubeDownloader.Core.Utils;
+using Lazy;
 using YoutubeDownloader.Core.Utils.Extensions;
 using YoutubeExplode.Videos.Streams;
 
@@ -10,11 +10,12 @@ namespace YoutubeDownloader.Core.Downloading;
 public partial record VideoDownloadOption(
     Container Container,
     bool IsAudioOnly,
-    IReadOnlyList<IStreamInfo> StreamInfos)
+    IReadOnlyList<IStreamInfo> StreamInfos
+)
 {
-    public VideoQuality? VideoQuality => Memo.Cache(this, () =>
-        StreamInfos.OfType<IVideoStreamInfo>().MaxBy(s => s.VideoQuality)?.VideoQuality
-    );
+    [Lazy]
+    public VideoQuality? VideoQuality =>
+        StreamInfos.OfType<IVideoStreamInfo>().MaxBy(s => s.VideoQuality)?.VideoQuality;
 }
 
 public partial record VideoDownloadOption
@@ -23,11 +24,11 @@ public partial record VideoDownloadOption
     {
         IEnumerable<VideoDownloadOption> GetVideoAndAudioOptions()
         {
-            var videoStreams = manifest
+            var videoStreamInfos = manifest
                 .GetVideoStreams()
                 .OrderByDescending(v => v.VideoQuality);
 
-            foreach (var videoStreamInfo in videoStreams)
+            foreach (var videoStreamInfo in videoStreamInfos)
             {
                 // Muxed stream
                 if (videoStreamInfo is MuxedStreamInfo)
@@ -115,8 +116,8 @@ public partial record VideoDownloadOption
         }
 
         // Deduplicate download options by video quality and container
-        var comparer = new DelegateEqualityComparer<VideoDownloadOption>(
-            (x, y) => x.VideoQuality == y.VideoQuality && x.Container == y.Container,
+        var comparer = EqualityComparer<VideoDownloadOption>.Create(
+            (x, y) => x?.VideoQuality == y?.VideoQuality && x?.Container == y?.Container,
             x => HashCode.Combine(x.VideoQuality, x.Container)
         );
 

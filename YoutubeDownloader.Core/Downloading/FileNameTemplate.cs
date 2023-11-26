@@ -10,14 +10,18 @@ public class FileNameTemplate
         string template,
         IVideo video,
         Container container,
-        string? number = null) =>
+        string? number = null
+    ) =>
         PathEx.EscapeFileName(
             template
                 .Replace("$num", number is not null ? $"[{number}]" : "")
+                .Replace("$numc", number ?? "")
                 .Replace("$id", video.Id)
                 .Replace("$title", video.Title)
                 .Replace("$author", video.Author.ChannelTitle)
                 .Replace("$uploadDate", (video as Video)?.UploadDate.ToString("yyyy-MM-dd") ?? "")
-                .Trim() + '.' + container.Name
+                .Trim()
+                + '.'
+                + container.Name
         );
 }
